@@ -454,7 +454,7 @@ void gatherVirtualEntries(const UnicodeString& dirName,
                vName};
         }
 
-        info.virtualMatches.push(m);
+        info.virtualMatches.push(std::move(m));
         info.foundFiles.insert(ush::to_upper(vName));
       }
     }
@@ -504,6 +504,13 @@ bool addVirtualSearchResult(PVOID& FileInformation,
       virtualName, FileInformationClass, FileInformation, dataRead, info.foundFiles,
       nullptr, nullptr, nullptr, ReturnSingleEntry);
   if (subRes == STATUS_SUCCESS) {
+    // A named virtual entry maps to one file. Finish it now instead of querying
+    // the same handle again only to receive STATUS_NO_MORE_FILES.
+    if (!virtualName.empty()) {
+      CloseHandle(info.currentSearchHandle);
+      info.currentSearchHandle = INVALID_HANDLE_VALUE;
+      info.virtualMatches.pop();
+    }
     return true;
   } else {
     // STATUS_NO_MORE_FILES merely means the search ended, everything else is an
@@ -623,14 +630,13 @@ NTSTATUS WINAPI usvfs::hook_NtQueryDirectoryFile(
   if (!moreRegular) {
     // add virtual results
     while (!dataReturned && infoIter->second.virtualMatches.size() > 0) {
-      auto match = infoIter->second.virtualMatches.front();
+      const auto& match = infoIter->second.virtualMatches.front();
       if (match.realPath.size() != 0) {
         dataRead = Length;
         if (addVirtualSearchResult(FileInformationCurrent, FileInformationClass,
                                    infoIter->second, match.realPath, match.virtualName,
                                    ReturnSingleEntry, dataRead)) {
-          // a positive result here means the call returned data and there may
-          // be further objects to be retrieved by repeating the call
+          // Whole-directory mappings may still have more results on this handle.
           dataReturned = true;
         } else {
           // proceed to next search handle
@@ -779,14 +785,13 @@ NTSTATUS WINAPI usvfs::hook_NtQueryDirectoryFileEx(
   if (!moreRegular) {
     // add virtual results
     while (!dataReturned && infoIter->second.virtualMatches.size() > 0) {
-      auto match = infoIter->second.virtualMatches.front();
+      const auto& match = infoIter->second.virtualMatches.front();
       if (match.realPath.size() != 0) {
         dataRead = Length;
         if (addVirtualSearchResult(FileInformationCurrent, FileInformationClass,
                                    infoIter->second, match.realPath, match.virtualName,
                                    QueryFlags & SL_RETURN_SINGLE_ENTRY, dataRead)) {
-          // a positive result here means the call returned data and there may
-          // be further objects to be retrieved by repeating the call
+          // Whole-directory mappings may still have more results on this handle.
           dataReturned = true;
         } else {
           // proceed to next search handle
