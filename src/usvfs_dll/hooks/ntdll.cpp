@@ -869,14 +869,20 @@ DLLEXPORT NTSTATUS WINAPI usvfs::hook_NtQueryObject(
       // TODO: is that always true?
       // path should start with \??\X: - we need to replace this by device name
       //
-      WCHAR deviceName[MAX_PATH];
       std::wstring buffer(static_cast<LPCWSTR>(trackerInfo));
-      buffer[6] = L'\0';
+      // Wine's NtQueryObject returns DOS paths. Its GetFinalPathNameByHandleW
+      // rejects device paths, so keep the virtual path in the same namespace.
+      static const bool isWine =
+          GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "wine_get_version") != nullptr;
+      if (!isWine) {
+        WCHAR deviceName[MAX_PATH];
+        buffer[6] = L'\0';
 
-      QueryDosDeviceW(buffer.data() + 4, deviceName, ARRAYSIZE(deviceName));
+        QueryDosDeviceW(buffer.data() + 4, deviceName, ARRAYSIZE(deviceName));
 
-      buffer = std::wstring(deviceName) + L'\\' +
-               std::wstring(buffer.data() + 7, buffer.size() - 7);
+        buffer = std::wstring(deviceName) + L'\\' +
+                 std::wstring(buffer.data() + 7, buffer.size() - 7);
+      }
 
       // the name is put in the buffer AFTER the struct, so the required size if
       // sizeof(OBJECT_NAME_INFORMATION) + the number of bytes for the name + 2 bytes

@@ -1,0 +1,43 @@
+name: Build Release without tests
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86, x64]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set VCPKG root
+        shell: bash
+        run: echo "VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT" >> "$GITHUB_ENV"
+      - name: Configure Release without tests
+        run: >-
+          cmake --preset vs2022-windows-${{ matrix.arch }}
+          -B build_${{ matrix.arch }}
+          -DCMAKE_INSTALL_PREFIX=install/Release
+          -DBUILD_TESTING=OFF
+          -DVCPKG_MANIFEST_FEATURES:STRING=
+      - name: Build Release
+        run: cmake --build build_${{ matrix.arch }} --config Release --target INSTALL
+      - uses: actions/upload-artifact@v4
+        with:
+          name: usvfs_Release_${{ matrix.arch }}
+          path: install/Release
+          if-no-files-found: error
+
+  package:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/upload-artifact/merge@v4
+        with:
+          name: usvfs_0.5.7.2_wine_Release
+          pattern: usvfs_Release_*
