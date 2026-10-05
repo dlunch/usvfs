@@ -193,6 +193,14 @@ TEST(SkipFilesTest, SkipFilesTest)
 {
   const auto data = parameters.data();
 
+  std::vector<std::string> entries;
+  for (const auto& entry : std::filesystem::recursive_directory_iterator(data)) {
+    entries.push_back(entry.path().lexically_relative(data).generic_string());
+  }
+  ASSERT_THAT(entries, ::testing::UnorderedElementsAre(
+                           "docs", "docs/doc.skip", "docs/doc.txt", "empty",
+                           "empty/.gitkeep", "file.txt", "readme.txt"));
+
   // file in mod1 should have been skipped
   ASSERT_FALSE(exists(data / "readme.skip"));
 

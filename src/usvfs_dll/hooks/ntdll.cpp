@@ -297,84 +297,103 @@ NTSTATUS addNtSearchData(HANDLE hdl, PUNICODE_STRING FileName,
                          FILE_INFORMATION_CLASS FileInformationClass, PVOID& buffer,
                          ULONG& bufferSize, std::set<std::wstring>& foundFiles,
                          HANDLE event, PIO_APC_ROUTINE apcRoutine, PVOID apcContext,
-                         BOOLEAN returnSingleEntry)
+                         BOOLEAN returnSingleEntry,
+                         std::map<std::wstring, std::wstring>* remainingNames = nullptr)
 {
   NTSTATUS res = STATUS_NO_SUCH_FILE;
   if (hdl != INVALID_HANDLE_VALUE) {
-    PVOID lastValidRecord = nullptr;
-    PVOID bufferInit      = buffer;
+    const ULONG bufferCapacity = bufferSize;
     IO_STATUS_BLOCK status;
-    res = NtQueryDirectoryFile(hdl, event, apcRoutine, apcContext, &status, buffer,
-                               bufferSize, FileInformationClass, returnSingleEntry,
-                               FileName, FALSE);
+    do {
+      bufferSize = bufferCapacity;
+      PVOID lastValidRecord = nullptr;
+      PVOID bufferInit      = buffer;
+      res = NtQueryDirectoryFile(hdl, event, apcRoutine, apcContext, &status, buffer,
+                                 bufferSize, FileInformationClass, returnSingleEntry,
+                                 FileName, FALSE);
 
-    if ((res != STATUS_SUCCESS) || (status.Information <= 0)) {
-      bufferSize = 0UL;
-    } else {
-      ULONG totalOffset = 0;
-      PVOID lastSkipPos = nullptr;
-
-      while (totalOffset < status.Information) {
-        ULONG offset;
-        std::wstring fileName;
-        GetFileInformationData(FileInformationClass, buffer, offset, fileName);
-        // in case this is a single-file search result and the specified
-        // filename differs from the file name found, replace it in the
-        // information structure
-        if ((totalOffset == 0) && (offset == 0) && (fakeName.length() > 0)) {
-          // if the fake name is larger than what is in the buffer and there is
-          // not enough room, that's a buffer overflow
-          if ((fakeName.length() > fileName.length()) &&
-              ((fakeName.length() - fileName.length()) >
-               (bufferSize - status.Information))) {
-            res = STATUS_BUFFER_OVERFLOW;
-            break;
-          }
-          // WARNING for the case where the fake name is longer this needs to
-          // move back all further results and update the offset first
-          SetFileInformationFileName(FileInformationClass, buffer, fakeName);
-          fileName = fakeName;
-        }
-        bool add = true;
-        if (fileName.length() > 0) {
-          auto insertRes = foundFiles.insert(ush::to_upper(fileName));
-          add = insertRes.second;  // add only if we didn't find this file before
-        }
-        if (!add) {
-          if (lastSkipPos == nullptr) {
-            lastSkipPos = buffer;
-          }
-        } else {
-          if (lastSkipPos != nullptr) {
-            memmove(lastSkipPos, buffer, status.Information - totalOffset);
-            ULONG delta = static_cast<ULONG>(ush::AddrDiff(buffer, lastSkipPos));
-            totalOffset -= delta;
-
-            buffer      = lastSkipPos;
-            lastSkipPos = nullptr;
-          }
-          lastValidRecord = buffer;
-        }
-
-        if (offset == 0) {
-          offset = static_cast<ULONG>(status.Information) - totalOffset;
-        }
-        buffer = ush::AddrAdd(buffer, offset);
-        totalOffset += offset;
-      }
-
-      if (lastSkipPos != nullptr) {
-        buffer     = lastSkipPos;
-        bufferSize = static_cast<ULONG>(ush::AddrDiff(buffer, bufferInit));
-        // null out the unused rest if there is some
-        memset(lastSkipPos, 0, status.Information - bufferSize);
+      if ((res != STATUS_SUCCESS) || (status.Information <= 0)) {
+        bufferSize = 0UL;
       } else {
-        bufferSize = static_cast<ULONG>(ush::AddrDiff(buffer, bufferInit));
+        ULONG totalOffset = 0;
+        PVOID lastSkipPos = nullptr;
+
+        while (totalOffset < status.Information) {
+          ULONG offset;
+          std::wstring fileName;
+          GetFileInformationData(FileInformationClass, buffer, offset, fileName);
+          // in case this is a single-file search result and the specified
+          // filename differs from the file name found, replace it in the
+          // information structure
+          if ((totalOffset == 0) && (offset == 0) && (fakeName.length() > 0)) {
+            // if the fake name is larger than what is in the buffer and there is
+            // not enough room, that's a buffer overflow
+            if ((fakeName.length() > fileName.length()) &&
+                ((fakeName.length() - fileName.length()) >
+                 (bufferSize - status.Information))) {
+              res = STATUS_BUFFER_OVERFLOW;
+              break;
+            }
+            // WARNING for the case where the fake name is longer this needs to
+            // move back all further results and update the offset first
+            SetFileInformationFileName(FileInformationClass, buffer, fakeName);
+            fileName = fakeName;
+          }
+          bool add = true;
+          if (fileName.length() > 0) {
+            auto upperName = ush::to_upper(fileName);
+            if (remainingNames) {
+              const auto iter = remainingNames->find(upperName);
+              add = iter != remainingNames->end();
+              if (add) {
+                // Only the case can differ for grouped entries, so the name fits.
+                if (fileName != iter->second) {
+                  SetFileInformationFileName(FileInformationClass, buffer, iter->second);
+                }
+                remainingNames->erase(iter);
+              }
+            }
+            add = add && foundFiles.insert(std::move(upperName)).second;
+          }
+          if (!add) {
+            if (lastSkipPos == nullptr) {
+              lastSkipPos = buffer;
+            }
+          } else {
+            if (lastSkipPos != nullptr) {
+              memmove(lastSkipPos, buffer, status.Information - totalOffset);
+              ULONG delta = static_cast<ULONG>(ush::AddrDiff(buffer, lastSkipPos));
+              totalOffset -= delta;
+              status.Information -= delta;
+
+              buffer      = lastSkipPos;
+              lastSkipPos = nullptr;
+            }
+            lastValidRecord = buffer;
+          }
+
+          if (offset == 0) {
+            offset = static_cast<ULONG>(status.Information) - totalOffset;
+          }
+          buffer = ush::AddrAdd(buffer, offset);
+          totalOffset += offset;
+        }
+
+        if (lastSkipPos != nullptr) {
+          buffer     = lastSkipPos;
+          bufferSize = static_cast<ULONG>(ush::AddrDiff(buffer, bufferInit));
+          // null out the unused rest if there is some
+          memset(lastSkipPos, 0, status.Information - bufferSize);
+        } else {
+          bufferSize = static_cast<ULONG>(ush::AddrDiff(buffer, bufferInit));
+        }
       }
-    }
-    if (lastValidRecord != nullptr) {
-      SetFileInformationOffset(FileInformationClass, lastValidRecord, 0);
-    }
+      if (lastValidRecord != nullptr) {
+        SetFileInformationOffset(FileInformationClass, lastValidRecord, 0);
+      }
+      // Keep scanning when a whole batch was filtered out. A native zero-byte
+      // result must reach the caller so it can retry with a larger buffer.
+    } while (res == STATUS_SUCCESS && status.Information > 0 && bufferSize == 0);
   }
   return res;
 }
@@ -389,11 +408,10 @@ struct Searches
     {
       // full path to where the file/directory actually is
       std::wstring realPath;
-      // virtual filename (only filename since it has to be within the searched
-      // directory)
-      // this is left empty when a folder with all its content is mapped to the
-      // search directory
+      // Empty for a directory group; otherwise the name of a single mapped entry.
       std::wstring virtualName;
+      // Uppercase lookup key and original virtual spelling for each remaining name.
+      std::map<std::wstring, std::wstring> remainingNames;
     };
 
     Info() : currentSearchHandle(INVALID_HANDLE_VALUE) {}
@@ -419,7 +437,9 @@ struct Searches
 
 void gatherVirtualEntries(const UnicodeString& dirName,
                           const usvfs::RedirectionTreeContainer& redir,
-                          PUNICODE_STRING FileName, Searches::Info& info)
+                          PUNICODE_STRING FileName,
+                          FILE_INFORMATION_CLASS FileInformationClass,
+                          Searches::Info& info)
 {
   LPCWSTR dirNameW = static_cast<LPCWSTR>(dirName);
   // fix directory name. I'd love to know why microsoft sometimes uses "\??\" vs
@@ -437,6 +457,7 @@ void gatherVirtualEntries(const UnicodeString& dirName,
 
     boost::replace_all(searchPattern, "\"", ".");
 
+    std::map<std::wstring, Searches::Info::VirtualMatch> directoryMatches;
     for (const auto& subNode : node->find(searchPattern)) {
       if (((subNode->data().linkTarget.length() > 0) || subNode->isDirectory()) &&
           !subNode->hasFlag(usvfs::shared::FLAG_DUMMY)) {
@@ -454,9 +475,34 @@ void gatherVirtualEntries(const UnicodeString& dirName,
                vName};
         }
 
-        info.virtualMatches.push(std::move(m));
-        info.foundFiles.insert(ush::to_upper(vName));
+        auto upperName = ush::to_upper(vName);
+        const bfs::path realPath(m.realPath);
+        if (FileInformationClass != FileObjectIdInformation &&
+            FileInformationClass != FileReparsePointInformation &&
+            realPath.filename().wstring() == vName) {
+          const auto parent = realPath.parent_path().wstring();
+          auto [iter, inserted] = directoryMatches.try_emplace(parent);
+          auto& group = iter->second;
+          if (inserted) {
+            group.realPath = std::move(m.realPath);
+            group.virtualName = vName;
+          } else {
+            group.realPath = parent;
+            group.virtualName.clear();
+          }
+          group.remainingNames.emplace(upperName, vName);
+        } else {
+          // Renamed entries need an individual query to rewrite their name.
+          info.virtualMatches.push(std::move(m));
+        }
+        info.foundFiles.insert(std::move(upperName));
       }
+    }
+    for (auto& [parent, match] : directoryMatches) {
+      if (!match.virtualName.empty()) {
+        match.remainingNames.clear();
+      }
+      info.virtualMatches.push(std::move(match));
     }
   }
 }
@@ -466,62 +512,59 @@ void gatherVirtualEntries(const UnicodeString& dirName,
  * @param FileInformation
  * @param FileInformationClass
  * @param info
- * @param realPath path were the actual file resides
- * @param virtualName virtual file name (without path). will often be the same
- *        as the name component of realpath
+ * @param match single mapped entry or a group from the same source directory
  * @param ReturnSingleEntry
  * @param dataRead
- * @return true if a virtual result was added, false if the search handle in the
- *         info object yields no more results
+ * @return status from querying the source directory
  */
-bool addVirtualSearchResult(PVOID& FileInformation,
-                            FILE_INFORMATION_CLASS FileInformationClass,
-                            Searches::Info& info, const std::wstring& realPath,
-                            const std::wstring& virtualName, BOOLEAN ReturnSingleEntry,
-                            ULONG& dataRead)
+NTSTATUS addVirtualSearchResult(PVOID& FileInformation,
+                                FILE_INFORMATION_CLASS FileInformationClass,
+                                Searches::Info& info,
+                                Searches::Info::VirtualMatch& match,
+                                BOOLEAN ReturnSingleEntry, ULONG& dataRead)
 {
   // this opens a search in the real location, then copies the information about
   // files we care about (the ones being mapped) to the result we intend to
   // return
-  bfs::path fullPath(realPath);
+  const bool directoryGroup = match.virtualName.empty();
+  bfs::path fullPath(match.realPath);
   if (fullPath.filename().wstring() == L".") {
     fullPath = fullPath.parent_path();
   }
   if (info.currentSearchHandle == INVALID_HANDLE_VALUE) {
-    std::wstring dirName = fullPath.parent_path().wstring();
+    std::wstring dirName =
+        directoryGroup ? fullPath.wstring() : fullPath.parent_path().wstring();
     if (dirName.length() >= MAX_PATH && !ush::startswith(dirName.c_str(), LR"(\\?\)"))
       dirName = LR"(\\?\)" + dirName;
     info.currentSearchHandle =
         CreateFileW(dirName.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
                     nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
   }
-  std::wstring fileName =
-      ush::string_cast<std::wstring>(fullPath.filename().string(), ush::CodePage::UTF8);
+  std::wstring fileName = directoryGroup ? L"" : fullPath.filename().wstring();
   NTSTATUS subRes = addNtSearchData(
       info.currentSearchHandle,
-      (fileName != L".") ? static_cast<PUNICODE_STRING>(UnicodeString(fileName.c_str()))
-                         : nullptr,
-      virtualName, FileInformationClass, FileInformation, dataRead, info.foundFiles,
-      nullptr, nullptr, nullptr, ReturnSingleEntry);
+      directoryGroup ? nullptr
+                     : static_cast<PUNICODE_STRING>(UnicodeString(fileName.c_str())),
+      match.virtualName, FileInformationClass, FileInformation, dataRead, info.foundFiles,
+      nullptr, nullptr, nullptr, ReturnSingleEntry,
+      directoryGroup ? &match.remainingNames : nullptr);
   if (subRes == STATUS_SUCCESS) {
-    // A named virtual entry maps to one file. Finish it now instead of querying
-    // the same handle again only to receive STATUS_NO_MORE_FILES.
-    if (!virtualName.empty()) {
+    // Close as soon as every mapped name has been returned, without scanning
+    // any remaining, unmapped files in the source directory.
+    if (dataRead != 0 && (!directoryGroup || match.remainingNames.empty())) {
       CloseHandle(info.currentSearchHandle);
       info.currentSearchHandle = INVALID_HANDLE_VALUE;
       info.virtualMatches.pop();
     }
-    return true;
-  } else {
-    // STATUS_NO_MORE_FILES merely means the search ended, everything else is an
-    // error message. Either way, the search here is finished and we should
-    // resume in the next mapped directory
-    if (subRes != STATUS_NO_MORE_FILES) {
-      spdlog::get("hooks")->warn("error reported listing files in {0}: {1:x}",
-                                 fullPath.string(), static_cast<uint32_t>(subRes));
-    }
-    return false;
+  } else if (subRes == STATUS_BUFFER_OVERFLOW || subRes == STATUS_BUFFER_TOO_SMALL) {
+    // Retry the remaining names from a fresh scan after the caller grows its buffer.
+    CloseHandle(info.currentSearchHandle);
+    info.currentSearchHandle = INVALID_HANDLE_VALUE;
+  } else if (subRes != STATUS_NO_MORE_FILES) {
+    spdlog::get("hooks")->warn("error reported listing files in {0}: {1:x}",
+                               fullPath.string(), static_cast<uint32_t>(subRes));
   }
+  return subRes;
 }
 
 NTSTATUS WINAPI usvfs::hook_NtQueryDirectoryFile(
@@ -561,6 +604,9 @@ NTSTATUS WINAPI usvfs::hook_NtQueryDirectoryFile(
     if (RestartScan) {
       auto iter = activeSearches.info.find(FileHandle);
       if (iter != activeSearches.info.end()) {
+        if (iter->second.currentSearchHandle != INVALID_HANDLE_VALUE) {
+          ::CloseHandle(iter->second.currentSearchHandle);
+        }
         activeSearches.info.erase(iter);
       }
     }
@@ -595,7 +641,7 @@ NTSTATUS WINAPI usvfs::hook_NtQueryDirectoryFile(
       searchPath = ntdllHandleTracker.lookup(FileHandle);
     }
     gatherVirtualEntries(searchPath, context->redirectionTable(), FileName,
-                         infoIter->second);
+                         FileInformationClass, infoIter->second);
   }
 
   ULONG dataRead               = Length;
@@ -617,7 +663,7 @@ NTSTATUS WINAPI usvfs::hook_NtQueryDirectoryFile(
         infoIter->second.foundFiles, Event, ApcRoutine, ApcContext, ReturnSingleEntry);
     moreRegular = subRes == STATUS_SUCCESS;
     if (moreRegular) {
-      dataReturned = dataRead != 0;
+      dataReturned = true;
     } else {
       infoIter->second.regularComplete = true;
       infoIter->second.foundFiles.clear();
@@ -630,14 +676,18 @@ NTSTATUS WINAPI usvfs::hook_NtQueryDirectoryFile(
   if (!moreRegular) {
     // add virtual results
     while (!dataReturned && infoIter->second.virtualMatches.size() > 0) {
-      const auto& match = infoIter->second.virtualMatches.front();
+      auto& match = infoIter->second.virtualMatches.front();
       if (match.realPath.size() != 0) {
         dataRead = Length;
-        if (addVirtualSearchResult(FileInformationCurrent, FileInformationClass,
-                                   infoIter->second, match.realPath, match.virtualName,
-                                   ReturnSingleEntry, dataRead)) {
-          // Whole-directory mappings may still have more results on this handle.
+        const auto subRes = addVirtualSearchResult(
+            FileInformationCurrent, FileInformationClass, infoIter->second, match,
+            ReturnSingleEntry, dataRead);
+        if (subRes == STATUS_SUCCESS) {
           dataReturned = true;
+        } else if (subRes == STATUS_BUFFER_OVERFLOW || subRes == STATUS_BUFFER_TOO_SMALL) {
+          IoStatusBlock->Status = subRes;
+          IoStatusBlock->Information = dataRead;
+          return subRes;
         } else {
           // proceed to next search handle
 
@@ -715,6 +765,9 @@ NTSTATUS WINAPI usvfs::hook_NtQueryDirectoryFileEx(
     if (QueryFlags & SL_RESTART_SCAN) {
       auto iter = activeSearches.info.find(FileHandle);
       if (iter != activeSearches.info.end()) {
+        if (iter->second.currentSearchHandle != INVALID_HANDLE_VALUE) {
+          ::CloseHandle(iter->second.currentSearchHandle);
+        }
         activeSearches.info.erase(iter);
       }
     }
@@ -749,7 +802,7 @@ NTSTATUS WINAPI usvfs::hook_NtQueryDirectoryFileEx(
       searchPath = ntdllHandleTracker.lookup(FileHandle);
     }
     gatherVirtualEntries(searchPath, context->redirectionTable(), FileName,
-                         infoIter->second);
+                         FileInformationClass, infoIter->second);
   }
 
   ULONG dataRead               = Length;
@@ -772,7 +825,7 @@ NTSTATUS WINAPI usvfs::hook_NtQueryDirectoryFileEx(
                                       ApcContext, QueryFlags & SL_RETURN_SINGLE_ENTRY);
     moreRegular     = subRes == STATUS_SUCCESS;
     if (moreRegular) {
-      dataReturned = dataRead != 0;
+      dataReturned = true;
     } else {
       infoIter->second.regularComplete = true;
       infoIter->second.foundFiles.clear();
@@ -785,14 +838,18 @@ NTSTATUS WINAPI usvfs::hook_NtQueryDirectoryFileEx(
   if (!moreRegular) {
     // add virtual results
     while (!dataReturned && infoIter->second.virtualMatches.size() > 0) {
-      const auto& match = infoIter->second.virtualMatches.front();
+      auto& match = infoIter->second.virtualMatches.front();
       if (match.realPath.size() != 0) {
         dataRead = Length;
-        if (addVirtualSearchResult(FileInformationCurrent, FileInformationClass,
-                                   infoIter->second, match.realPath, match.virtualName,
-                                   QueryFlags & SL_RETURN_SINGLE_ENTRY, dataRead)) {
-          // Whole-directory mappings may still have more results on this handle.
+        const auto subRes = addVirtualSearchResult(
+            FileInformationCurrent, FileInformationClass, infoIter->second, match,
+            QueryFlags & SL_RETURN_SINGLE_ENTRY, dataRead);
+        if (subRes == STATUS_SUCCESS) {
           dataReturned = true;
+        } else if (subRes == STATUS_BUFFER_OVERFLOW || subRes == STATUS_BUFFER_TOO_SMALL) {
+          IoStatusBlock->Status = subRes;
+          IoStatusBlock->Information = dataRead;
+          return subRes;
         } else {
           // proceed to next search handle
 
