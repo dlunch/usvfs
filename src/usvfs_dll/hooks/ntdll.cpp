@@ -325,7 +325,8 @@ NTSTATUS addNtSearchData(HANDLE hdl, PUNICODE_STRING FileName,
           // in case this is a single-file search result and the specified
           // filename differs from the file name found, replace it in the
           // information structure
-          if ((totalOffset == 0) && (offset == 0) && (fakeName.length() > 0)) {
+          if ((totalOffset == 0) && (offset == 0) && !fakeName.empty() &&
+              fakeName != fileName) {
             // if the fake name is larger than what is in the buffer and there is
             // not enough room, that's a buffer overflow
             if ((fakeName.length() > fileName.length()) &&
